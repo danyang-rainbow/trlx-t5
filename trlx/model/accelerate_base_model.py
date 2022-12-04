@@ -46,27 +46,27 @@ class AccelerateRLModel(BaseRLModel):
 
         if config.model.tokenizer_path:
             self.tokenizer = AutoTokenizer.from_pretrained(config.model.tokenizer_path)
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.tokenizer.padding_side = "left"
+            # self.tokenizer.pad_token = self.tokenizer.eos_token
+            # self.tokenizer.padding_side = "left"
         else:
             self.tokenizer = None
 
-        if hasattr(self.model.gpt, "gpt_neox"):
-            gpt_blocks = self.model.gpt.gpt_neox.layers
-        else:
-            gpt_blocks = self.model.gpt.transformer.h
+        # if hasattr(self.model.gpt, "gpt_neox"):
+        #     gpt_blocks = self.model.gpt.gpt_neox.layers
+        # else:
+        #     gpt_blocks = self.model.gpt.transformer.h
 
-        # freeze transformer's bottom layers if num_layers_unfrozen >= 0
-        num_layers_unfrozen = self.config.model.num_layers_unfrozen
-        if num_layers_unfrozen == 0:
-            gpt_blocks_to_freeze = list(gpt_blocks)
-        elif num_layers_unfrozen > 0:
-            gpt_blocks_to_freeze = list(gpt_blocks)[:-num_layers_unfrozen]
-        else:
-            gpt_blocks_to_freeze = []
+        # # freeze transformer's bottom layers if num_layers_unfrozen >= 0
+        # num_layers_unfrozen = self.config.model.num_layers_unfrozen
+        # if num_layers_unfrozen == 0:
+        #     gpt_blocks_to_freeze = list(gpt_blocks)
+        # elif num_layers_unfrozen > 0:
+        #     gpt_blocks_to_freeze = list(gpt_blocks)[:-num_layers_unfrozen]
+        # else:
+        #     gpt_blocks_to_freeze = []
 
-        for m in gpt_blocks_to_freeze:
-            m.requires_grad_(False)
+        # for m in gpt_blocks_to_freeze:
+        #     m.requires_grad_(False)
 
         script_name = os.path.basename(sys.argv[0]).rsplit(".", 1)[0]
         if not isinstance(config.model.model_path, str):
@@ -112,10 +112,10 @@ class AccelerateRLModel(BaseRLModel):
         if isinstance(text[0], torch.LongTensor):
             return text
 
-        text = [self.tokenizer.bos_token + txt for txt in text]
         return self.tokenizer(
             text,
             truncation=True,
+            padding='max_length',
             max_length=self.config.seq_length,
             return_tensors="pt",
         )
@@ -163,7 +163,7 @@ class AccelerateRLModel(BaseRLModel):
             if isinstance(samples, tuple):
                 samples, *_ = samples
 
-            pad_token = self.tokenizer.eos_token_id if self.tokenizer else 0
+            pad_token = 0
             all_samples.append(
                 F.pad(
                     samples,
@@ -192,7 +192,7 @@ class AccelerateRLModel(BaseRLModel):
                 columns.append("reward")
                 columns_data.append(rewards)
                 stats["mean_reward"] = mean_reward
-                print(f"{mean_reward=}")
+                print(f"{mean_reward}")
 
             # additionally log any other metrics
             if self.metric_fn:

@@ -12,6 +12,7 @@ from transformers import (
     AutoModelForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
+    AutoModelForSeq2SeqLM,
 )
 from transformers.modeling_outputs import ModelOutput
 
@@ -213,8 +214,11 @@ class CausalLMOutputWithCrossAttentions(ModelOutput):
 
 
 def make_head(n_embd: int, out: int):
+    # return nn.Sequential(
+    #     nn.Linear(n_embd, n_embd * 2), nn.ReLU(), nn.Linear(n_embd * 2, out)
+    # )
     return nn.Sequential(
-        nn.Linear(n_embd, n_embd * 2), nn.ReLU(), nn.Linear(n_embd * 2, out)
+        nn.Linear(n_embd, n_embd * 2).bfloat16(), nn.ReLU().bfloat16(), nn.Linear(n_embd * 2, out).bfloat16()
     )
 
 
@@ -595,5 +599,55 @@ class GPTHydraHeadWithValueModel(nn.Module):
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
             cross_attentions=None,
+            value=value,
+        )
+
+
+
+class T5HeadWithValueModel(nn.Module):
+
+
+    def __init__(self, config: Union[PretrainedConfig, str]):
+        super().__init__()
+        if isinstance(config, PretrainedConfig):
+            self.t5 = AutoModelForSeq2SeqLM.from_config(config)
+        else:
+            self.t5 = AutoModelForSeq2SeqLM.from_pretrained(config, torch_dtype=torch.bfloat16)
+
+        self.n_embd = self.t5.config.d_model
+        self.v_head = make_head(self.n_embd, 1)
+
+    def generate(self, input_ids, **x):
+        return self.t5.generate(input_ids, **x)
+
+    def forward(self, **x):
+        loss = None
+        
+        t5_outputs = self.t5(**x)
+        # transformer_outputs = self.gpt.transformer(
+        #     input_ids,
+        #     past_key_values=past_key_values,
+        #     attention_mask=attention_mask,
+        #     token_type_ids=token_type_ids,
+        #     position_ids=position_ids,
+        #     head_mask=head_mask,
+        #     inputs_embeds=inputs_embeds,
+        # )
+        
+        hidden_states = t5_outputs.decoder_hidden_states
+        lm_logits = self.t5.lm_head(hidden_states)
+        value = self.v_head(hidden_states).squeeze(-1)
+
+        if not x["return_dict"]:
+            outputs = (lm_logits,) + t5_outputs[1:] + (value,)
+            return outputs
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=t5_outputs.past_key_values,
+            hidden_states=t5_outputs.decoder_hidden_states,
+            attentions=None,
+            cross_attentions=t5_outputs.cross_attentions,
             value=value,
         )

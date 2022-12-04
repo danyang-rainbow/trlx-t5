@@ -1,10 +1,10 @@
 from typing import Callable
 
 import torch
+import numpy as np
 from trlx.data.accelerate_base_datatypes import PromptBatch
 from trlx.data.ppo_types import PPORLElement
 from trlx.model import BaseRLModel
-from trlx.model.nn.ppo_models import GPTHeadWithValueModel, GPTHydraHeadWithValueModel
 from trlx.orchestrator import Orchestrator, register_orchestrator
 from trlx.pipeline import BasePipeline
 from trlx.utils import Clock
@@ -39,7 +39,8 @@ class PPOOrchestrator(Orchestrator):
         self.pipeline_iterator = iter(self.pipeline_loader)
 
         if not hasattr(self.rl_model.model, "frozen_head"):
-            self.ref_model = self.rl_model.get_arch(self.rl_model.config)
+            # self.ref_model = self.rl_model.get_arch(self.rl_model.config).to(self.rl_model.model.t5.device)
+            self.ref_model = self.rl_model.get_arch(self.rl_model.config).to("cuda:1")
 
         self.rl_model.orch = self
         self.rl_model.reward_fn = reward_fn
@@ -72,12 +73,17 @@ class PPOOrchestrator(Orchestrator):
 
             exp_generate_time = time()
             samples = self.rl_model.generate(**batch)
+            print("samples")
+            print(samples.device)
+            samples = samples[:,1:]
+            # TODO samples handling
+            
             stats["exp_generate_time"] = time() - exp_generate_time
 
             query_tensors = batch.input_ids
-            response_tensors = samples[:, query_tensors.shape[1] :]
+            response_tensors = samples.clone().detach().to(samples.device)
             texts = self.rl_model.tokenizer.batch_decode(
-                samples, skip_special_tokens=True
+                response_tensors, skip_special_tokens=True
             )
             exp_score_time = time()
             scores = torch.as_tensor(self.score(texts), device=samples.device)
@@ -102,38 +108,53 @@ class PPOOrchestrator(Orchestrator):
                 scores = torch.clip(scores, -clip_reward, clip_reward)
 
             # Precompute logprobs, values
-            all_tokens, attention_mask, position_ids = self.rl_model.get_model_inputs(
+            input_ids, labels, decoder_input_ids = self.rl_model.get_model_inputs(
                 query_tensors.to(response_tensors.device), response_tensors
             )
+            
+            model_inputs = {
+                'input_ids': input_ids,
+                'labels': labels,
+                'decoder_input_ids': decoder_input_ids,
+                "return_dict":True
+            }
+
             with torch.no_grad():
-                logits, _, v = self.rl_model.model(
-                    all_tokens, attention_mask, position_ids=position_ids
+                outputs_tmp = self.rl_model.model(
+                    **model_inputs
                 )
+                logits = outputs_tmp.logits
+                v = outputs_tmp.value
                 # TODO(dahoas): When hydra model works need to also support generation on hydra head
                 if hasattr(self.rl_model.model, "frozen_head"):
-                    ref_logits = self.rl_model.model.forward_hydra(
-                        all_tokens,
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        return_dict=False,
-                    )
+                    # ref_logits = self.rl_model.model.forward_hydra(
+                    #     all_tokens,
+                    #     attention_mask=attention_mask,
+                    #     position_ids=position_ids,
+                    #     return_dict=False,
+                    # )
+                    pass
                 else:
-                    ref_logits, _, _ = self.ref_model(
-                        all_tokens.cpu(),
-                        attention_mask.cpu(),
-                        position_ids=position_ids.cpu(),
+                    model_inputs = {
+                        'input_ids': input_ids.to("cuda:1"),
+                        'labels': labels.to("cuda:1"),
+                        'decoder_input_ids': decoder_input_ids.to("cuda:1"),
+                        "return_dict":True
+                    }
+                    outputs_tmp = self.ref_model.t5(
+                        **model_inputs
                     )
+                    ref_logits = outputs_tmp["logits"]
 
             ref_logits = ref_logits.to(self.rl_model.accelerator.device)
-            logprobs = logprobs_from_logits(logits[:, :-1, :], all_tokens[:, 1:])
-            ref_logprobs = logprobs_from_logits(
-                ref_logits[:, :-1, :], all_tokens[:, 1:]
-            )
-            start = query_tensors.size()[1] - 1
-            end = query_tensors.size()[1] + response_tensors.size()[1] - 1
-            all_values = v[:, start:end]
-            all_logprobs = logprobs[:, start:end]
-            all_ref_logprobs = ref_logprobs[:, start:end]
+            logprobs = logprobs_from_logits(logits, response_tensors)
+            ref_logprobs = logprobs_from_logits(ref_logits, response_tensors)
+            
+            # start = query_tensors.size()[1] - 1
+            # end = query_tensors.size()[1] + response_tensors.size()[1] - 1
+            all_values = v
+            all_logprobs = logprobs
+            all_ref_logprobs = ref_logprobs
 
             # Compute rewards
             kls = all_logprobs - all_ref_logprobs

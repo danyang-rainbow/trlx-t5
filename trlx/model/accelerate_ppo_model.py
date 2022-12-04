@@ -10,18 +10,26 @@ from trlx.model.accelerate_base_model import AccelerateRLModel
 from trlx.model.nn.ppo_models import (
     AdaptiveKLController,
     FixedKLController,
-    GPTHydraHeadWithValueModel,
+    T5HeadWithValueModel,
 )
 from trlx.pipeline.ppo_pipeline import PPORolloutStorage
 from trlx.utils.modeling import logprobs_from_logits
 
+def shift_tokens_right(input_ids, pad_token_id=0, decoder_start_token_id=0):
+    """平移Label ids, 得到Deocde input ids
+    """
+    shifted_input_ids = torch.zeros_like(input_ids).to(input_ids.device)
+    shifted_input_ids[:, 1:] = input_ids[:, :-1]
+    shifted_input_ids[:, 0] = decoder_start_token_id
+    shifted_input_ids[shifted_input_ids==-100] = pad_token_id
+    return shifted_input_ids
 
 @register_model
 class AcceleratePPOModel(AccelerateRLModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.store = PPORolloutStorage(self.tokenizer.pad_token_id)
+        self.store = PPORolloutStorage(0)
 
         rollout_loader = self.store.create_loader(
             self.config.train.batch_size, shuffle=True
@@ -41,28 +49,32 @@ class AcceleratePPOModel(AccelerateRLModel):
 
         self.generate_kwargs = dict(
             config.method.gen_kwargs,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=1,
+            pad_token_id=0,
         )
 
     def get_arch(self, config: TRLConfig):
-        return GPTHydraHeadWithValueModel(
-            self.config.model.model_path, self.config.model.num_layers_unfrozen
+        return T5HeadWithValueModel(
+            self.config.model.model_path
         )
+        
+        # gpt self.config.model.model_path, self.config.model.num_layers_unfrozen
 
     def get_model_inputs(
         self,
         query_tensors: TensorType["batch_size", "query_size"],
         response_tensors: TensorType["batch_size", "response_size"],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        tokens = torch.cat((query_tensors, response_tensors), dim=1)
-        attention_mask = (
-            tokens.not_equal(self.tokenizer.pad_token_id).long().to(tokens.device)
-        )
-        # For a proper positional encoding in case of left padding
-        position_ids = attention_mask.cumsum(-1) - 1
-        position_ids.masked_fill_(attention_mask.eq(0), 0)
-        return tokens, attention_mask, position_ids
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:        
+        input_seq = query_tensors
+        new_label_ids = response_tensors
+        decoder_input_ids = shift_tokens_right(new_label_ids)
+        
+        
+        print(input_seq.device)
+        print(new_label_ids.device)
+        print(decoder_input_ids.device)
+        return input_seq, new_label_ids, decoder_input_ids
+        
 
     def loss(self, batch: PPORLBatch):
         # Move `batch` data to `accelerator` device
@@ -77,14 +89,26 @@ class AcceleratePPOModel(AccelerateRLModel):
             old_values, old_rewards, response_length
         )
 
-        tokens, attention_mask, position_ids = self.get_model_inputs(
+        input_ids, labels, decoder_input_ids = self.get_model_inputs(
             query_tensors, response_tensors
         )
-        logits, _, values_pred = self.model(
-            tokens, attention_mask, position_ids=position_ids
+        
+        model_inputs = {
+            'input_ids': input_ids,
+            'labels': labels,
+            'decoder_input_ids': decoder_input_ids,
+            "return_dict":True
+        }
+        
+        model_outputs = self.model(
+            **model_inputs
         )
-        logprobs = logprobs_from_logits(logits[:, :-1, :], tokens[:, 1:])
+        logits = model_outputs.logits
+        values_pred = model_outputs.value
+        logprobs = logprobs_from_logits(logits, labels)
         # Only the response part of the values/logprobs is needed
+        
+        attention_mask = torch.ones_like(logprobs, dtype=torch.long)
         logprobs, values_pred, mask = (
             logprobs[:, -response_length:],
             values_pred[:, -response_length:],
