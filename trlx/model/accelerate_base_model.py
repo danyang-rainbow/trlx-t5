@@ -153,8 +153,10 @@ class AccelerateRLModel(BaseRLModel):
         """Samples model on `eval_prompts`, logs stats with `reward_fn` or `metric_fn` if provided"""
         stats = {}
         all_samples = []
+        all_response_gt = []
         generate_time = time()
         for prompts in self.eval_dataloader:
+            all_response_gt += prompts.pop("response_gt")
             if isinstance(prompts, torch.Tensor):
                 samples = self.generate(prompts)
             else:
@@ -173,12 +175,12 @@ class AccelerateRLModel(BaseRLModel):
             )
         stats["generate_time"] = time() - generate_time
 
-        samples = self.accelerator.gather(torch.vstack(all_samples))
-
+        samples = torch.vstack(all_samples)
+        
         if self.accelerator.is_main_process:
             if self.tokenizer:
-                samples = self.tokenizer.batch_decode(samples, skip_special_tokens=True)
-
+                samples = self.tokenizer.batch_decode(samples)
+                samples = [one.replace(" ","").replace("<pad>", "") for one in samples]
             if isinstance(samples[0], str):
                 columns_data = [samples]
             else:
@@ -187,7 +189,8 @@ class AccelerateRLModel(BaseRLModel):
 
             # in online setting, compute the reward for validation
             if self.reward_fn:
-                rewards = torch.as_tensor(self.reward_fn(samples), dtype=torch.float)
+                
+                rewards = torch.as_tensor(self.reward_fn(samples, all_response_gt, all_response_gt), dtype=torch.float)
                 mean_reward = rewards.mean()
                 columns.append("reward")
                 columns_data.append(rewards)
@@ -247,54 +250,55 @@ class AccelerateRLModel(BaseRLModel):
 
         for _ in range(self.config.train.epochs):
             for batch in self.train_dataloader:
-                for _ in range(self.n_updates_per_batch):
-                    forward_time = time()
-                    loss, stats = self.loss(batch)
-                    forward_time = time() - forward_time
+                with self.accelerator.accumulate(self.model):
+                    for _ in range(self.n_updates_per_batch):
+                        forward_time = time()
+                        loss, stats = self.loss(batch)
+                        forward_time = time() - forward_time
 
-                    backward_time = time()
-                    self.accelerator.backward(loss)
-                    backward_time = time() - backward_time
+                        backward_time = time()
+                        self.accelerator.backward(loss)
+                        backward_time = time() - backward_time
 
-                    self.opt.step()
-                    self.opt.zero_grad()
-                    self.scheduler.step()
-                    self.iter_count += 1
+                        self.opt.step()
+                        self.opt.zero_grad()
+                        self.scheduler.step()
+                        self.iter_count += 1
 
-                    if self.iter_count % self.config.train.checkpoint_interval == 0:
-                        self.save()
+                        if self.iter_count % self.config.train.checkpoint_interval == 0:
+                            self.save()
 
-                    stats["forward_time"] = forward_time
-                    stats["backward_time"] = backward_time
+                        stats["forward_time"] = forward_time
+                        stats["backward_time"] = backward_time
 
-                    if self.iter_count % self.config.train.eval_interval == 0:
-                        results = self.evaluate()
-                        stats.update(results)
+                        if self.iter_count % self.config.train.eval_interval == 0:
+                            results = self.evaluate()
+                            stats.update(results)
 
-                        # Report the metrics to Ray Tune.
-                        if ray.is_initialized():
-                            self.save("state")
-                            with open("state/state.json", "w") as f:
-                                json.dump(dict(iter_count=self.iter_count), f)
-                            checkpoint = Checkpoint.from_directory("state")
-                            session.report(
-                                filter_non_scalars(stats), checkpoint=checkpoint
-                            )
+                            # Report the metrics to Ray Tune.
+                            if ray.is_initialized():
+                                self.save("state")
+                                with open("state/state.json", "w") as f:
+                                    json.dump(dict(iter_count=self.iter_count), f)
+                                checkpoint = Checkpoint.from_directory("state")
+                                session.report(
+                                    filter_non_scalars(stats), checkpoint=checkpoint
+                                )
 
-                    if not ray.is_initialized():
-                        self.accelerator.log(stats, step=self.iter_count)
+                        if not ray.is_initialized():
+                            self.accelerator.log(stats, step=self.iter_count)
 
-                    desc = ", ".join(
-                        f"{k}: {v:.2f}"
-                        for k, v in stats.items()
-                        if k.startswith("loss")
-                    )
-                    tbar.set_description(desc)
-                    tbar.update()
+                        desc = ", ".join(
+                            f"{k}: {v:.2f}"
+                            for k, v in stats.items()
+                            if k.startswith("loss")
+                        )
+                        tbar.set_description(desc)
+                        tbar.update()
 
-                    if self.iter_count >= self.total_steps:
-                        self.save()
-                        return self.evaluate()
+                        if self.iter_count >= self.total_steps:
+                            self.save()
+                            return self.evaluate()
 
                 self.post_backward_callback()
 

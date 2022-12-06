@@ -618,7 +618,8 @@ class T5HeadWithValueModel(nn.Module):
         self.v_head = make_head(self.n_embd, 1)
 
     def generate(self, input_ids, **x):
-        return self.t5.generate(input_ids, **x)
+        text = self.t5.generate(input_ids, decoder_start_token_id=0, forced_bos_token_id=21128, **x)
+        return text
 
     def forward(self, **x):
         loss = None
@@ -635,7 +636,8 @@ class T5HeadWithValueModel(nn.Module):
         # )
         
         hidden_states = t5_outputs.decoder_hidden_states
-        lm_logits = self.t5.lm_head(hidden_states)
+        # lm_logits = self.t5.lm_head(hidden_states)
+        lm_logits = t5_outputs.logits
         value = self.v_head(hidden_states).squeeze(-1)
 
         if not x["return_dict"]:

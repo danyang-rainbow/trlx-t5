@@ -70,9 +70,9 @@ class AcceleratePPOModel(AccelerateRLModel):
         decoder_input_ids = shift_tokens_right(new_label_ids)
         
         
-        print(input_seq.device)
-        print(new_label_ids.device)
-        print(decoder_input_ids.device)
+        # print(input_seq.device)
+        # print(new_label_ids.device)
+        # print(decoder_input_ids.device)
         return input_seq, new_label_ids, decoder_input_ids
         
 

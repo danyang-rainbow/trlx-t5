@@ -39,8 +39,8 @@ class PPOOrchestrator(Orchestrator):
         self.pipeline_iterator = iter(self.pipeline_loader)
 
         if not hasattr(self.rl_model.model, "frozen_head"):
-            # self.ref_model = self.rl_model.get_arch(self.rl_model.config).to(self.rl_model.model.t5.device)
-            self.ref_model = self.rl_model.get_arch(self.rl_model.config).to("cuda:1")
+            self.ref_model = self.rl_model.get_arch(self.rl_model.config).to(self.rl_model.model.t5.device)
+            # self.ref_model = self.rl_model.get_arch(self.rl_model.config).to(self.rl_model.model.device)
 
         self.rl_model.orch = self
         self.rl_model.reward_fn = reward_fn
@@ -50,11 +50,11 @@ class PPOOrchestrator(Orchestrator):
         self.ref_mean = self.rl_model.config.method.ref_mean
         self.ref_std = self.rl_model.config.method.ref_std
 
-    def score(self, samples):
+    def score(self, samples, queries=None, response_gt=None):
         """
         Batched scoring function taking text and generating scalar
         """
-        return self.rl_model.reward_fn(samples)
+        return self.rl_model.reward_fn(samples, queries, response_gt)
 
     def make_experience(self, num_rollouts: int = 1024, iter_count: int = 0):
         """
@@ -72,10 +72,13 @@ class PPOOrchestrator(Orchestrator):
                 batch = next(self.pipeline_iterator)
 
             exp_generate_time = time()
+            response_gt = batch.pop("response_gt")
             samples = self.rl_model.generate(**batch)
-            print("samples")
-            print(samples.device)
+            input_text = self.rl_model.tokenizer.batch_decode(batch["input_ids"])
+            # print("samples")
+            # print(samples.device)
             samples = samples[:,1:]
+            # samples = [one.replace(" ","") for one in samples]
             # TODO samples handling
             
             stats["exp_generate_time"] = time() - exp_generate_time
@@ -83,10 +86,11 @@ class PPOOrchestrator(Orchestrator):
             query_tensors = batch.input_ids
             response_tensors = samples.clone().detach().to(samples.device)
             texts = self.rl_model.tokenizer.batch_decode(
-                response_tensors, skip_special_tokens=True
+                response_tensors
             )
+            texts = [one.replace(" ","").replace("<pad>", "") for one in texts]
             exp_score_time = time()
-            scores = torch.as_tensor(self.score(texts), device=samples.device)
+            scores = torch.as_tensor(self.score(texts, queries=query_tensors, response_gt=response_gt), device=samples.device)
             stats["exp_score_time"] = time() - exp_score_time
 
             # store statistics of the initial rollout as reference
@@ -136,9 +140,9 @@ class PPOOrchestrator(Orchestrator):
                     pass
                 else:
                     model_inputs = {
-                        'input_ids': input_ids.to("cuda:1"),
-                        'labels': labels.to("cuda:1"),
-                        'decoder_input_ids': decoder_input_ids.to("cuda:1"),
+                        'input_ids': input_ids,
+                        'labels': labels,
+                        'decoder_input_ids': decoder_input_ids,
                         "return_dict":True
                     }
                     outputs_tmp = self.ref_model.t5(

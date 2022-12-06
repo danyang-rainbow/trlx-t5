@@ -1,14 +1,14 @@
 model:
-  model_path: "/root/tmp/ul2-1.5b-novel280g"  # Name of hf model to load
-  tokenizer_path: "/root/tmp/ul2-1.5b-novel280g"  # Name of hf tokenizer to load
+  model_path: "/home/fuxi-common/jiangdanyang/ul2_new/output_1130/checkpoint-6000"  # Name of hf model to load
+  tokenizer_path: "/home/fuxi-common/jiangdanyang/ul2_new/output_1130/checkpoint-6000"  # Name of hf tokenizer to load
   model_type: "AcceleratePPOModel"  # Name of accelerate model type to load
   num_layers_unfrozen: 0  # Number of bottom layers to freeze during training
 
 train:
-  seq_length: 48  # Size of LM context
+  seq_length: 512  # Size of LM context
   epochs: 100 # Train for max(epochs, total_steps)
   total_steps: 10000  # Train for max(epochs, total_steps)
-  batch_size: 1  # batch size
+  batch_size: 12  # batch size
 
   lr_init: 1.0e-4  # init learning rate
   lr_target: 1.0e-4  # target final learning rate
@@ -17,7 +17,7 @@ train:
   weight_decay: 1.0e-6  # weight decay param
 
   checkpoint_interval: 10000  # checkpoint interval
-  eval_interval: 100  # eval interval
+  eval_interval: 96  # eval interval
 
   pipeline: "PromptPipeline"  # prompt pipeline to load
   orchestrator: "PPOOrchestrator"  # orchestrator to load
@@ -42,6 +42,6 @@ method:
   gen_kwargs:
     max_length: 49  # LM max sample gen length
     min_length: 49  # LM min sample gen length
-    top_k: 0.0  # top k
-    top_p: 1.0  # top p
+    top_k: 1  # top k
+    top_p: 1  # top p
     do_sample: True  # sample
